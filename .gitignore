@@ -1,0 +1,7 @@
+bin/
+obj/
+.idea/
+ShiroBot/
+*.user
+*.suo
+*.pdb
