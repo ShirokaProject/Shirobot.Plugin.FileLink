@@ -9,8 +9,8 @@ namespace ShiroBot.Plugin.FileLink;
     Description = "用于群聊获取文件直链 / 保存直链到群内",
     Author = "greepar",
     Category = PluginCategory.Utility,
-    Version = "1.0.0",
-    GithubRepo = "ShirokaProject/FileLinkPlugin",
+    Version = "1.1.0",
+    GithubRepo = "ShirokaProject/Shirobot.Plugin.FileLink",
     IsPluginSingleFile = false)]
 public sealed class FileLinkPlugin : PluginBase
 {
@@ -21,13 +21,11 @@ public sealed class FileLinkPlugin : PluginBase
         GroupCommands.MapPrefix("#savefile", HandleSaveFileAsync);
         GroupCommands.MapPrefix("#savemax", HandleSaveMaxAsync);
         GroupCommands.MapPrefix("#getlink", HandleGetLinkAsync);
-        GroupCommands.MapPrefix("#getall", HandleGetLinkAsync);
         return Task.CompletedTask;
     }
 
     protected override Task OnUnloadAsync()
     {
-        BotLog.Info("标准示例插件已卸载。");
         return Task.CompletedTask;
     }
 
@@ -35,7 +33,9 @@ public sealed class FileLinkPlugin : PluginBase
     {
         try
         {
-            if ( _config.OnlyAllowAdminSaveCommand &&
+            var config = ReloadConfig();
+
+            if ( config.OnlyAllowAdminSaveCommand &&
                 !(Context.OwnerList.Contains(message.SenderId) || Context.AdminList.Contains(message.SenderId)) )
             {
                 await Context.Message.ReplyAsync(message, "只有管理员和主人可以使用此命令。");
@@ -51,8 +51,8 @@ public sealed class FileLinkPlugin : PluginBase
             var url = new Uri(text[1]);
             BotLog.Info($"正在处理保存文件命令，URL: {url}");
 
-            var metadata = await DownloadHelper.GetDownloadMetadataAsync(url, _config.HttpProxy, CancellationToken.None);
-            var maxMb = _config.MaxDownloadFileSizeMb;
+            var metadata = await DownloadHelper.GetDownloadMetadataAsync(url, config.HttpProxy, CancellationToken.None);
+            var maxMb = config.MaxDownloadFileSizeMb;
             var maxSize = maxMb * 1024L * 1024L;
 
             if (maxMb > 0 && metadata.TotalBytes is not null)
@@ -93,7 +93,7 @@ public sealed class FileLinkPlugin : PluginBase
                 filePath,
                 metadata,
                 fileName,
-                _config.HttpProxy,
+                config.HttpProxy,
                 CancellationToken.None);
 
             var downloadedFileInfo = new FileInfo(filePath);
@@ -142,6 +142,8 @@ public sealed class FileLinkPlugin : PluginBase
 
     private async Task HandleSaveMaxAsync(GroupIncomingMessage message)
     {
+        ReloadConfig();
+
         if (!(Context.OwnerList.Contains(message.SenderId) || Context.AdminList.Contains(message.SenderId)))
         {
             await Context.Message.ReplyAsync(message, "只有管理员和主人可以使用此命令。");
@@ -165,6 +167,8 @@ public sealed class FileLinkPlugin : PluginBase
 
     private async Task HandleGetLinkAsync(GroupIncomingMessage message)
     {
+        ReloadConfig();
+
         var text = message.GetPlainText().Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (text.Length < 2)
         {
@@ -197,7 +201,7 @@ public sealed class FileLinkPlugin : PluginBase
                 {
                     var file = result[0];
                     var url = await Context.File.GetGroupFileDownloadUrlAsync(groupId, file.FileId);
-                    await Context.Message.ReplyAsync(message, $"找到文件:\n{file.FileName}\n下载链接{url.DownloadUrl}");
+                    await Context.Message.ReplyAsync(message, $"找到文件:\n{file.FileName}\n下载链接{url.DownloadUrl}{file.FileName}");
                     return;
                 }
                 default:
@@ -206,10 +210,11 @@ public sealed class FileLinkPlugin : PluginBase
                         (index > 0 && index <= result.Count ? true : throw new Exception("请输入正确序号")))
                     {
                         index -= 1;
-                        var targetFileId = result[index].FileId;
+                        var file = result[index];
+                        var targetFileId = file.FileId;
                         var url = await Context.File.GetGroupFileDownloadUrlAsync(groupId, targetFileId);
                         await Context.Message.ReplyAsync(message,
-                            $"文件:\n{result[index].FileName}\n下载链接{url.DownloadUrl}");
+                            $"文件:\n{file.FileName}\n下载链接{url.DownloadUrl}{file.FileName}");
                         return;
                     }
 
@@ -241,6 +246,12 @@ public sealed class FileLinkPlugin : PluginBase
                 await CollectFilesAsync(folder.FolderId);
             }
         }
+    }
+
+    private PluginConfig ReloadConfig()
+    {
+        _config = Context.Config.Load<PluginConfig>();
+        return _config;
     }
 
 }
