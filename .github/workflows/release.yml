@@ -15,16 +15,20 @@ permissions:
   contents: write
 
 env:
-  PROJECT_DIR: .
   PUBLISH_DIR: bin/Release/net10.0/publish
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ShiroBot.FileLinkPlugin
 
     steps:
-      - name: Checkout
+      - name: Checkout plugin
         uses: actions/checkout@v4
+        with:
+          path: ShiroBot.FileLinkPlugin
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -32,24 +36,54 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Publish
-        run: dotnet publish "$PROJECT_DIR" --configuration Release
+        run: dotnet publish --configuration Release
 
-      - name: Collect Plugin DLL
+      - name: Package and verify plugin
         shell: bash
         run: |
-          PROJECT="$(basename "$(ls *.csproj | head -1)" .csproj)"
+          set -euo pipefail
+          PROJECT="$(basename "$(ls *.csproj)" .csproj)"
           PLUGIN_DLL="$PUBLISH_DIR/${PROJECT}.dll"
           if [ ! -f "$PLUGIN_DLL" ]; then
             echo "Plugin DLL not found: $PLUGIN_DLL"
             ls -la "$PUBLISH_DIR"
             exit 1
           fi
-          mkdir -p release
-          cp "$PLUGIN_DLL" release/
 
-      - name: Upload DLL to Release
+          unexpected_files="$(find "$PUBLISH_DIR" -maxdepth 1 -type f ! -name "${PROJECT}.dll" ! -name "${PROJECT}.pdb" -print)"
+          if [ -n "$unexpected_files" ]; then
+            echo "Publish output contains unexpected files:"
+            printf '%s\n' "$unexpected_files"
+            exit 1
+          fi
+
+          forbidden_assemblies='^(ShiroBot\.SDK|ShiroBot\.Model\.|Avalonia|SkiaSharp|HarfBuzzSharp|MicroCom)(\.|$)'
+          if find "$PUBLISH_DIR" -maxdepth 1 -type f -name '*.dll' -printf '%f\n' | grep -E "$forbidden_assemblies"; then
+            echo "Publish output contains host-shared assemblies."
+            exit 1
+          fi
+
+          mkdir -p release
+          cp "$PLUGIN_DLL" "release/${PROJECT}.dll"
+          archive_files=("${PROJECT}.dll")
+          if [ -f "$PUBLISH_DIR/${PROJECT}.pdb" ]; then
+            cp "$PUBLISH_DIR/${PROJECT}.pdb" "release/${PROJECT}.pdb"
+            archive_files+=("${PROJECT}.pdb")
+          fi
+          (cd release && zip -9 "${PROJECT}.zip" "${archive_files[@]}")
+          rm -f "release/${PROJECT}.dll" "release/${PROJECT}.pdb"
+
+          archive_entries="$(unzip -Z1 "release/${PROJECT}.zip")"
+          if ! printf '%s\n' "$archive_entries" | grep -qx "${PROJECT}.dll" ||
+             printf '%s\n' "$archive_entries" | grep -Ev "^${PROJECT//./\\.}\.(dll|pdb)$" | grep -q .; then
+            echo "Release archive must contain only the plugin DLL and an optional PDB:"
+            printf '%s\n' "$archive_entries"
+            exit 1
+          fi
+
+      - name: Upload plugin archive to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
           target_commitish: ${{ github.sha }}
-          files: release/*.dll
+          files: ShiroBot.FileLinkPlugin/release/*.zip

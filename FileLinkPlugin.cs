@@ -1,7 +1,12 @@
-using ShiroBot.Model.Common;
+using LightDl;
+using System.Net;
+using ShiroBot.Model.QQ;
 using ShiroBot.SDK.Abstractions;
 using ShiroBot.SDK.Core;
+using ShiroBot.SDK.Models;
 using ShiroBot.SDK.Plugin;
+
+[assembly: ShiroBotApiCompatibility("0.8", "0.8")]
 
 namespace ShiroBot.Plugin.FileLink;
 
@@ -9,34 +14,54 @@ namespace ShiroBot.Plugin.FileLink;
     Description = "用于群聊获取文件直链 / 保存直链到群内",
     Author = "greepar",
     Category = PluginCategory.Utility,
-    Version = "1.1.0",
+    Version = "1.1.1",
     GithubRepo = "ShirokaProject/Shirobot.Plugin.FileLink",
-    IsPluginSingleFile = false)]
+    IsPluginSingleFile = true,
+    SharedAssemblies = "ShiroBot.Model.QQ;ShiroBot.Model.Discord;ShiroBot.Model.Telegram")]
 public sealed class FileLinkPlugin : PluginBase
 {
+    private readonly object _replySubscriptionsLock = new();
+    private readonly HashSet<IReplySubscription> _replySubscriptions = [];
     private PluginConfig _config = new();
-    protected override Task LoadAsync()
+    private IDisposable? _configWatcher;
+
+    protected override void ConfigureRoutes()
     {
-        _config = Context.Config.Load<PluginConfig>();
         GroupCommands.MapPrefix("#savefile", HandleSaveFileAsync);
         GroupCommands.MapPrefix("#savemax", HandleSaveMaxAsync);
         GroupCommands.MapPrefix("#getlink", HandleGetLinkAsync);
+    }
+
+    protected override Task LoadAsync()
+    {
+        _config = Context.Config.Load<PluginConfig>();
+        _configWatcher = Context.Config.Watch<PluginConfig>(config => _config = config);
         return Task.CompletedTask;
     }
 
     protected override Task OnUnloadAsync()
     {
+        _configWatcher?.Dispose();
+
+        lock (_replySubscriptionsLock)
+        {
+            foreach (var subscription in _replySubscriptions)
+            {
+                subscription.Dispose();
+            }
+
+            _replySubscriptions.Clear();
+        }
+
         return Task.CompletedTask;
     }
 
-    private async Task HandleSaveFileAsync(GroupIncomingMessage message)
+    private async Task HandleSaveFileAsync(MessageEvent message)
     {
         try
         {
-            var config = ReloadConfig();
-
-            if ( config.OnlyAllowAdminSaveCommand &&
-                !(Context.OwnerList.Contains(message.SenderId) || Context.AdminList.Contains(message.SenderId)) )
+            var config = _config;
+            if (config.OnlyAllowAdminSaveCommand && !Context.IsAdmin(message.Sender.Id))
             {
                 await Context.Message.ReplyAsync(message, "只有管理员和主人可以使用此命令。");
                 return;
@@ -50,73 +75,73 @@ public sealed class FileLinkPlugin : PluginBase
 
             var url = new Uri(text[1]);
             BotLog.Info($"正在处理保存文件命令，URL: {url}");
+            var groupId = GetQqGroupId(message);
+            var fileApi = GetFileApi();
 
-            var metadata = await DownloadHelper.GetDownloadMetadataAsync(url, config.HttpProxy, CancellationToken.None);
-            var maxMb = config.MaxDownloadFileSizeMb;
-            var maxSize = maxMb * 1024L * 1024L;
-
-            if (maxMb > 0 && metadata.TotalBytes is not null)
-            {
-                BotLog.Info($"HEAD 获取到文件大小: {metadata.TotalBytes}");
-
-                if (metadata.TotalBytes > maxSize)
-                {
-                    await Context.Message.ReplyAsync(message,
-                        $"文件过大: {metadata.TotalBytes / 1024 / 1024} MB, 超过 {maxMb} MB");
-                    return;
-                }
-            }
-
-            var fileName = metadata.SuggestedFileName;
-            if (string.IsNullOrWhiteSpace(fileName))
-            {
-                fileName = Path.GetFileName(url.LocalPath);
-            }
-
-            if (string.IsNullOrWhiteSpace(fileName))
-            {
-                fileName = $"file_{Guid.NewGuid():N}";
-            }
-
-            fileName = Uri.UnescapeDataString(fileName);
-            fileName = Path.GetFileName(fileName);
-
-            var tempPath = Path.Combine(Path.GetTempPath(), "ShiroBot", "downloads");
+            var tempPath = Path.Combine(Context.PluginDirectory, ".tmp");
             Directory.CreateDirectory(tempPath);
-            var filePath = Path.Combine(tempPath, $"{Guid.NewGuid():N}_{fileName}");
 
-            await Context.Message.ReplyAsync(message,
-                $"开始下载: {fileName}\n大小: {(metadata.TotalBytes != null ? metadata.TotalBytes / 1024 / 1024 + " MB" : "未知")}");
+            using var cts = new CancellationTokenSource();
+            var maxBytes = config.MaxDownloadFileSizeMb > 0
+                ? config.MaxDownloadFileSizeMb * 1024L * 1024L
+                : long.MaxValue;
+            LightDownloadFileInfo? remoteFileInfo = null;
+            long rejectedSize = -1;
 
-            await DownloadHelper.DownloadWithProgressAsync(
-                url,
-                filePath,
-                metadata,
-                fileName,
-                config.HttpProxy,
-                CancellationToken.None);
-
-            var downloadedFileInfo = new FileInfo(filePath);
-            if (!downloadedFileInfo.Exists)
+            var request = LightDownloadRequest.ToDirectory(url.ToString(), tempPath)
+                .OnFileInfo(info =>
+                {
+                    remoteFileInfo = info;
+                    if (info.Size > maxBytes)
+                    {
+                        Interlocked.Exchange(ref rejectedSize, info.Size);
+                        cts.Cancel();
+                    }
+                })
+                .OnProgress(p =>
+                {
+                    if (p.DownloadedBytes > maxBytes)
+                    {
+                        Interlocked.Exchange(ref rejectedSize, p.DownloadedBytes);
+                        BotLog.Info($"文件过大，大小: {p.DownloadedBytes / 1024d / 1024d:F2} MB，超过最大限制 {config.MaxDownloadFileSizeMb} MB,取消下载");
+                        cts.Cancel();
+                    }
+                    BotLog.Info($"\r{p.ProgressPercentage:F1}%  {p.Speed / 1024d / 1024d:F1} MB/s");
+                });
+            BotLog.Info($"开始下载文件: {url}");
+            LightDownloadResult dlResult;
+            try
             {
-                throw new FileNotFoundException("下载完成后未找到目标文件。", filePath);
+                var downloadConfig = new LightDownloadConfig
+                {
+                    Proxy = CreateProxy(config.HttpProxy)
+                };
+                dlResult = await LightDownload.DownloadAsync(request, downloadConfig, cts.Token);
             }
-
-            if (maxMb > 0 && downloadedFileInfo.Length > maxSize)
+            catch (OperationCanceledException) when (Interlocked.Read(ref rejectedSize) >= 0)
             {
-                File.Delete(filePath);
-                await Context.Message.ReplyAsync(message, "文件超过限制（下载中断）");
+                await Context.Message.ReplyAsync(message,
+                    $"文件过大，大小: {Interlocked.Read(ref rejectedSize) / 1024d / 1024d:F2} MB，超过最大限制 {config.MaxDownloadFileSizeMb} MB");
                 return;
             }
 
-            BotLog.Info($"下载完成: {filePath}");
-            await Context.Message.ReplyAsync(message, "下载完成.");
+            var filePath = dlResult.FilePath;
+            var fileName = dlResult.FileName;
+
+            if (remoteFileInfo is not null)
+            {
+                await Context.Message.ReplyAsync(message,
+                    $"获取到文件信息: {remoteFileInfo.FileName}，大小: {remoteFileInfo.Size / 1024d / 1024d:F2} MB");
+            }
+
+            BotLog.Info($"下载完成,临时保存到目录: {dlResult.FilePath}");
+            await Context.Message.ReplyAsync(message, "下载完成,开始上传.");
 
             try
             {
                 var fileUri = new Uri(filePath).AbsoluteUri;
-                BotLog.Info($"开始上传群文件: {fileName} -> {message.Group.GroupId}");
-                await Context.File.UploadGroupFileAsync(message.Group.GroupId, fileUri, fileName, "/");
+                BotLog.Info($"开始上传群文件: {fileName} -> {groupId}");
+                await fileApi.UploadGroupFileAsync(groupId, fileUri, fileName);
             }
             finally
             {
@@ -140,11 +165,9 @@ public sealed class FileLinkPlugin : PluginBase
         }
     }
 
-    private async Task HandleSaveMaxAsync(GroupIncomingMessage message)
+    private async Task HandleSaveMaxAsync(MessageEvent message)
     {
-        ReloadConfig();
-
-        if (!(Context.OwnerList.Contains(message.SenderId) || Context.AdminList.Contains(message.SenderId)))
+        if (!Context.IsAdmin(message.Sender.Id))
         {
             await Context.Message.ReplyAsync(message, "只有管理员和主人可以使用此命令。");
             return;
@@ -165,10 +188,8 @@ public sealed class FileLinkPlugin : PluginBase
             : $"已设置最大保存文件大小为 {maxMb} MB。");
     }
 
-    private async Task HandleGetLinkAsync(GroupIncomingMessage message)
+    private async Task HandleGetLinkAsync(MessageEvent message)
     {
-        ReloadConfig();
-
         var text = message.GetPlainText().Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (text.Length < 2)
         {
@@ -177,8 +198,9 @@ public sealed class FileLinkPlugin : PluginBase
         }
 
         var name = text[1];
-        var groupId = message.Group.GroupId;
-        var files = new List<GroupFileEntity>();
+        var groupId = GetQqGroupId(message);
+        var fileApi = GetFileApi();
+        var files = new List<QGroupFile>();
 
         BotLog.Info("正在处理获取链接命令...");
 
@@ -200,30 +222,51 @@ public sealed class FileLinkPlugin : PluginBase
                 case 1:
                 {
                     var file = result[0];
-                    var url = await Context.File.GetGroupFileDownloadUrlAsync(groupId, file.FileId);
-                    await Context.Message.ReplyAsync(message, $"找到文件:\n{file.FileName}\n下载链接{url.DownloadUrl}{file.FileName}");
+                    var url = await fileApi.GetGroupFileDownloadUrlAsync(groupId, file.FileId);
+                    await Context.Message.ReplyAsync(message, $"找到文件:\n{file.FileName}\n下载链接: {url}");
                     return;
                 }
                 default:
                 {
-                    if (text.Length == 3 && int.TryParse(text[2], out var index) &&
-                        (index > 0 && index <= result.Count ? true : throw new Exception("请输入正确序号")))
+                    if (result.Count > 60)
                     {
-                        index -= 1;
-                        var file = result[index];
-                        var targetFileId = file.FileId;
-                        var url = await Context.File.GetGroupFileDownloadUrlAsync(groupId, targetFileId);
-                        await Context.Message.ReplyAsync(message,
-                            $"文件:\n{file.FileName}\n下载链接{url.DownloadUrl}{file.FileName}");
+                        await Context.Message.ReplyAsync(message, $"结果过多,请输入更精确的关键字。");
                         return;
                     }
-
                     var fileListString = string.Join("\n",
                         result.Select((f, i) =>
-                            $"{i + 1}. {f.FileName}  ({DateTimeOffset.FromUnixTimeSeconds(f.UploadedTime).ToLocalTime().DateTime})"));
+                            $"{i + 1}. {f.FileName}  ({f.UploadedTime?.ToLocalTime().DateTime})"));
+                    var subMsg = await Context.Message.ReplyAsync(message,
+                        $"找到多个文件 ({result.Count}):\n{fileListString}\n\n在10分钟内用序号回复此消息获取下载链接.");
 
-                    await Context.Message.ReplyAsync(message,
-                        $"找到多个文件 ({result.Count}):\n{fileListString}\n\n使用方式:\n#getlink {name} <序号>");
+                    IReplySubscription? subscription = null;
+                    subscription = Context.Message.SubscribeReply(subMsg.MessageId, TimeSpan.FromMinutes(10), async replyMessage =>
+                    {
+                        if (replyMessage.Channel.Id == message.Channel.Id &&
+                            int.TryParse(replyMessage.GetPlainText(), out var replyIndex) &&
+                            replyIndex > 0 && replyIndex <= result.Count)
+                        {
+                            replyIndex -= 1;
+                            var file = result[replyIndex];
+                            try
+                            {
+                                var url = await fileApi.GetGroupFileDownloadUrlAsync(groupId, file.FileId);
+                                await Context.Message.ReplyAsync(replyMessage, $"文件:\n{file.FileName}\n下载链接: {url}");
+                            }
+                            finally
+                            {
+                                DisposeReplySubscription(subscription);
+                            }
+                        }
+                        else
+                        {
+                            await Context.Message.ReplyAsync(replyMessage, "请输入正确的序号。");
+                        }
+                    }, false);
+                    lock (_replySubscriptionsLock)
+                    {
+                        _replySubscriptions.Add(subscription);
+                    }
                     return;
                 }
             }
@@ -238,7 +281,7 @@ public sealed class FileLinkPlugin : PluginBase
 
         async Task CollectFilesAsync(string parentFolderId)
         {
-            var response = await Context.File.GetGroupFilesAsync(groupId, parentFolderId);
+            var response = await fileApi.GetGroupFilesAsync(groupId, parentFolderId);
             files.AddRange(response.Files);
 
             foreach (var folder in response.Folders)
@@ -248,10 +291,38 @@ public sealed class FileLinkPlugin : PluginBase
         }
     }
 
-    private PluginConfig ReloadConfig()
+    private IQFileApi GetFileApi() =>
+        Context.GetAdapterExtension<IQFileApi>()
+        ?? throw new NotSupportedException("当前 QQ 适配器不支持群文件操作。");
+
+    private static long GetQqGroupId(MessageEvent message) =>
+        long.TryParse(message.Channel.Id, out var groupId)
+            ? groupId
+            : throw new NotSupportedException("当前消息不是有效的 QQ 群消息。");
+
+    private static WebProxy? CreateProxy(string? httpProxy)
     {
-        _config = Context.Config.Load<PluginConfig>();
-        return _config;
+        if (string.IsNullOrWhiteSpace(httpProxy))
+        {
+            return null;
+        }
+
+        return Uri.TryCreate(httpProxy.Trim(), UriKind.Absolute, out var proxyUri)
+            ? new WebProxy(proxyUri)
+            : throw new ArgumentException($"HTTP 代理地址格式错误: {httpProxy}");
     }
 
+    private void DisposeReplySubscription(IReplySubscription? subscription)
+    {
+        if (subscription is null)
+        {
+            return;
+        }
+
+        subscription.Dispose();
+        lock (_replySubscriptionsLock)
+        {
+            _replySubscriptions.Remove(subscription);
+        }
+    }
 }
