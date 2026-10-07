@@ -3,10 +3,13 @@ using System.Net;
 using ShiroBot.Model.QQ;
 using ShiroBot.SDK.Abstractions;
 using ShiroBot.SDK.Core;
+
 using ShiroBot.SDK.Models;
 using ShiroBot.SDK.Plugin;
 
-[assembly: ShiroBotApiCompatibility("0.8", "0.8")]
+[assembly: RequiresShiroBotPackage("shirobot.model.qq", MinimumVersion = "0.9.8")]
+
+[assembly: ShiroBotApiCompatibility("0.9.2", "0.9.2")]
 
 namespace ShiroBot.Plugin.FileLink;
 
@@ -61,7 +64,7 @@ public sealed class FileLinkPlugin : PluginBase
         try
         {
             var config = _config;
-            if (config.OnlyAllowAdminSaveCommand && !Context.IsAdmin(message.Sender.Id))
+            if (config.OnlyAllowAdminSaveCommand && !Context.IsAdmin(message.Reference.InstanceId is { } instanceId ? new UserReference(instanceId, message.Sender.Id) : throw new InvalidOperationException("消息缺少来源实例。")))
             {
                 await Context.Message.ReplyAsync(message, "只有管理员和主人可以使用此命令。");
                 return;
@@ -167,7 +170,7 @@ public sealed class FileLinkPlugin : PluginBase
 
     private async Task HandleSaveMaxAsync(MessageEvent message)
     {
-        if (!Context.IsAdmin(message.Sender.Id))
+        if (!Context.IsAdmin(message.Reference.InstanceId is { } instanceId ? new UserReference(instanceId, message.Sender.Id) : throw new InvalidOperationException("消息缺少来源实例。")))
         {
             await Context.Message.ReplyAsync(message, "只有管理员和主人可以使用此命令。");
             return;
@@ -240,7 +243,7 @@ public sealed class FileLinkPlugin : PluginBase
                         $"找到多个文件 ({result.Count}):\n{fileListString}\n\n在10分钟内用序号回复此消息获取下载链接.");
 
                     IReplySubscription? subscription = null;
-                    subscription = Context.Message.SubscribeReply(subMsg.MessageId, TimeSpan.FromMinutes(10), async replyMessage =>
+                    subscription = Context.Message.SubscribeReply(subMsg.Reference ?? new MessageReference(message.Reference.InstanceId, message.Channel, subMsg.MessageId), TimeSpan.FromMinutes(10), async replyMessage =>
                     {
                         if (replyMessage.Channel.Id == message.Channel.Id &&
                             int.TryParse(replyMessage.GetPlainText(), out var replyIndex) &&
@@ -295,9 +298,9 @@ public sealed class FileLinkPlugin : PluginBase
         Context.GetAdapterExtension<IQFileApi>()
         ?? throw new NotSupportedException("当前 QQ 适配器不支持群文件操作。");
 
-    private static long GetQqGroupId(MessageEvent message) =>
-        long.TryParse(message.Channel.Id, out var groupId)
-            ? groupId
+    private static string GetQqGroupId(MessageEvent message) =>
+        message.Channel.Type == ChannelType.Group && string.Equals(message.Platform, "qq", StringComparison.OrdinalIgnoreCase)
+            ? message.Channel.Id
             : throw new NotSupportedException("当前消息不是有效的 QQ 群消息。");
 
     private static WebProxy? CreateProxy(string? httpProxy)

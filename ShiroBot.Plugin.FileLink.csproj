@@ -12,7 +12,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="ShiroBot.SDK" Version="0.9.1" />
+        <PackageReference Include="ShiroBot.SDK" Version="0.9.8" />
         <PackageReference Include="LightDl" Version="0.2.1" />
     </ItemGroup>
 
