@@ -17,7 +17,7 @@ namespace ShiroBot.Plugin.FileLink;
     Description = "用于群聊获取文件直链 / 保存直链到群内",
     Author = "greepar",
     Category = PluginCategory.Utility,
-    Version = "1.1.1",
+    Version = "1.2.0",
     GithubRepo = "ShirokaProject/Shirobot.Plugin.FileLink",
     IsPluginSingleFile = true,
     SharedAssemblies = "ShiroBot.Model.QQ;ShiroBot.Model.Discord;ShiroBot.Model.Telegram")]

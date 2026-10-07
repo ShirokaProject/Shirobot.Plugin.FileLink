@@ -1,4 +1,6 @@
 ```
+
+当前发布：`v1.2.0`。本版本使用 SDK `0.9.8`，需要宿主 `0.9.8` 的新 ABI；旧宿主不兼容。
 获取群文件直链 #getlink <FileName>
 下载直链到群文件 #savefile <FileLink>
 设置最大下载大小 #savemax <SizeMb>
