@@ -1,3 +1,4 @@
+using ShiroBot.SDK.Config;
 using LightDl;
 using System.Net;
 using ShiroBot.Model.QQ;
@@ -17,16 +18,22 @@ namespace ShiroBot.Plugin.FileLink;
     Description = "用于群聊获取文件直链 / 保存直链到群内",
     Author = "greepar",
     Category = PluginCategory.Utility,
-    Version = "1.2.0",
+    Version = "1.2.1",
     GithubRepo = "ShirokaProject/Shirobot.Plugin.FileLink",
     IsPluginSingleFile = true,
     SharedAssemblies = "ShiroBot.Model.QQ;ShiroBot.Model.Discord;ShiroBot.Model.Telegram")]
-public sealed class FileLinkPlugin : PluginBase
+public sealed class FileLinkPlugin : PluginBase<PluginConfig>
 {
     private readonly object _replySubscriptionsLock = new();
     private readonly HashSet<IReplySubscription> _replySubscriptions = [];
     private PluginConfig _config = new();
-    private IDisposable? _configWatcher;
+
+    protected override Task OnConfigChangedAsync(PluginConfig previous, PluginConfig current, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _config = current;
+        return Task.CompletedTask;
+    }
 
     protected override void ConfigureRoutes()
     {
@@ -37,14 +44,12 @@ public sealed class FileLinkPlugin : PluginBase
 
     protected override Task LoadAsync()
     {
-        _config = Context.Config.Load<PluginConfig>();
-        _configWatcher = Context.Config.Watch<PluginConfig>(config => _config = config);
+        _config = Settings;
         return Task.CompletedTask;
     }
 
     protected override Task OnUnloadAsync()
     {
-        _configWatcher?.Dispose();
 
         lock (_replySubscriptionsLock)
         {
