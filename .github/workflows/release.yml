@@ -65,18 +65,13 @@ jobs:
 
           mkdir -p release
           cp "$PLUGIN_DLL" "release/${PROJECT}.dll"
-          archive_files=("${PROJECT}.dll")
-          if [ -f "$PUBLISH_DIR/${PROJECT}.pdb" ]; then
-            cp "$PUBLISH_DIR/${PROJECT}.pdb" "release/${PROJECT}.pdb"
-            archive_files+=("${PROJECT}.pdb")
-          fi
-          (cd release && zip -9 "${PROJECT}.zip" "${archive_files[@]}")
-          rm -f "release/${PROJECT}.dll" "release/${PROJECT}.pdb"
+          (cd release && zip -9 "${PROJECT}.zip" "${PROJECT}.dll")
+          rm -f "release/${PROJECT}.dll"
 
           archive_entries="$(unzip -Z1 "release/${PROJECT}.zip")"
           if ! printf '%s\n' "$archive_entries" | grep -qx "${PROJECT}.dll" ||
-             printf '%s\n' "$archive_entries" | grep -Ev "^${PROJECT//./\\.}\.(dll|pdb)$" | grep -q .; then
-            echo "Release archive must contain only the plugin DLL and an optional PDB:"
+             printf '%s\n' "$archive_entries" | grep -Ev "^${PROJECT//./\\.}\.dll$" | grep -q .; then
+            echo "Release archive must contain only the plugin DLL:"
             printf '%s\n' "$archive_entries"
             exit 1
           fi
